@@ -118,18 +118,54 @@ function createLabelPlan() {
     return;
   }
 
+  const lastRow = source.getLastRow();
+  const data = lastRow < 2
+    ? []
+    : source.getRange(2, 1, lastRow - 1, 3).getValues()
+      .filter(row => String(row[0]).trim() !== '');
+
+  if (data.length === 0) {
+    SpreadsheetApp.getUi().alert(
+      'No Gmail labels were found in the Gmail Labels sheet.'
+    );
+    return;
+  }
+
   const planName = 'Label Plan';
   let plan = ss.getSheetByName(planName);
+  const isNewPlan = !plan;
+
+  if (plan && plan.getLastRow() > 1) {
+    const existing = plan.getRange(2, 1, plan.getLastRow() - 1, 10);
+    const hasWork = existing.getValues().some(row => row.some(value => value !== '')) ||
+      existing.getFormulas().some(row => row.some(formula => formula !== ''));
+
+    if (hasWork) {
+      const ui = SpreadsheetApp.getUi();
+      const response = ui.alert(
+        'Regenerate Label Plan?',
+        'This will replace all planning rows in columns A:J, including proposals, ' +
+        'validation, results, and notes. This cannot be undone by this tool. ' +
+        'Content outside A:J will be preserved. Continue?',
+        ui.ButtonSet.YES_NO
+      );
+
+      if (response !== ui.Button.YES) {
+        return;
+      }
+    }
+  }
 
   if (!plan) {
     plan = ss.insertSheet(planName);
   }
 
-  /*
-   * Clear only data managed by the script.
-   * User formatting and column widths are preserved.
-   */
-  plan.clearContents();
+  if (plan.getMaxRows() < data.length + 1) {
+    plan.insertRowsAfter(plan.getMaxRows(), data.length + 1 - plan.getMaxRows());
+  }
+
+  // A:J is tool-owned; clear contents without changing ordinary formatting.
+  plan.getRange(1, 1, plan.getMaxRows(), 10).clearContent();
 
   const headers = [
     'Current Full Label Path',
@@ -145,19 +181,6 @@ function createLabelPlan() {
   ];
 
   plan.getRange(1, 1, 1, headers.length).setValues([headers]);
-
-  const lastRow = source.getLastRow();
-
-  if (lastRow < 2) {
-    SpreadsheetApp.getUi().alert(
-      'No Gmail labels were found in the Gmail Labels sheet.'
-    );
-    return;
-  }
-
-  const data = source
-    .getRange(2, 1, lastRow - 1, 3)
-    .getValues();
 
   const rows = data.map(row => [
     row[0], // Current Full Label Path
@@ -259,13 +282,14 @@ function createLabelPlan() {
       .build()
   ];
 
-  plan.setConditionalFormatRules(rules);
+  const userRules = plan.getConditionalFormatRules()
+    .filter(rule => !isLabelPlanStatusRule_(rule));
+  plan.setConditionalFormatRules(userRules.concat(rules));
 
-  plan.setFrozenRows(1);
-
-  plan
-    .getRange(1, 1, 1, headers.length)
-    .setFontWeight('bold');
+  if (isNewPlan) {
+    plan.setFrozenRows(1);
+    plan.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+  }
 
   SpreadsheetApp.getUi().alert(
     'Label Plan created with ' +
@@ -273,6 +297,52 @@ function createLabelPlan() {
     ' existing Gmail labels.\n\n' +
     'No Gmail changes were made.'
   );
+}
+
+
+function isLabelPlanStatusRule_(rule) {
+  const condition = rule.getBooleanCondition();
+  if (!condition ||
+      condition.getCriteriaType() !== SpreadsheetApp.BooleanCriteria.CUSTOM_FORMULA) {
+    return false;
+  }
+
+  // Match the legacy rules narrowly so unrelated user rules survive regeneration.
+  const backgrounds = {
+    '=$H2="Ready"': '#e6f4ea',
+    '=$H2="No change"': '#f8f9fa',
+    '=LEFT($H2,5)="Error"': '#fce8e6',
+    '=LEFT($H2,6)="Review"': '#fff4e5'
+  };
+  const formula = String(condition.getCriteriaValues()[0]);
+  const ranges = rule.getRanges();
+
+  return Object.prototype.hasOwnProperty.call(backgrounds, formula) &&
+    condition.getBackgroundObject()?.asRgbColor().asHexString() === backgrounds[formula] &&
+    ranges.length === 1 &&
+    ranges[0].getSheet().getName() === 'Label Plan' &&
+    ranges[0].getRow() === 2 &&
+    ranges[0].getColumn() === 1 &&
+    ranges[0].getNumColumns() === 10;
+}
+
+
+function onEdit(e) {
+  if (!e || !e.range) {
+    return;
+  }
+
+  const range = e.range;
+  const sheet = range.getSheet();
+  if (sheet.getName() !== 'Label Plan' ||
+      range.getLastRow() < 2 ||
+      range.getColumn() > 7 || range.getLastColumn() < 4) {
+    return;
+  }
+
+  const firstRow = Math.max(2, range.getRow());
+  sheet.getRange(firstRow, 8, range.getLastRow() - firstRow + 1, 3)
+    .clearContent();
 }
 
 
