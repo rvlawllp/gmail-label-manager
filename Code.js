@@ -4,8 +4,7 @@ function onOpen() {
     .addItem('Export Gmail Labels', 'exportGmailLabels')
     .addItem('Create Label Plan', 'createLabelPlan')
     .addItem('Validate Label Plan', 'validateLabelPlan')
-    .addSeparator()
-    .addItem('Create Run Log', 'createRunLog')
+    .addItem('Preflight Label Plan', 'preflightLabelPlan')
     .addSeparator()
     .addItem('Clear Label Inventory', 'clearLabelInventory')
     .addToUi();
@@ -229,23 +228,27 @@ function createLabelPlan() {
   /*
    * Action dropdown
    */
-  const actionRule = SpreadsheetApp
-    .newDataValidation()
-    .requireValueInList(
-      [
-        'Keep',
-        'Rename/Move',
-        'Create',
-        'Delete'
-      ],
-      true
-    )
-    .setAllowInvalid(false)
-    .build();
+  const actionRule = labelPlanActionRule_();
 
   plan
     .getRange(2, 7, rows.length, 1)
     .setDataValidation(actionRule);
+
+  updateLabelPlanFormatting_(plan, rows.length);
+
+  if (isNewPlan) {
+    plan.setFrozenRows(1);
+    plan.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+  }
+
+  SpreadsheetApp.getUi().alert(
+    'Label Plan created with ' + rows.length + ' existing Gmail labels.\n\n' +
+    'No Gmail changes were made.'
+  );
+}
+
+
+function updateLabelPlanFormatting_(plan, rowCount) {
 
   /*
    * Conditional formatting managed by the script.
@@ -254,8 +257,8 @@ function createLabelPlan() {
   const dataRange = plan.getRange(
     2,
     1,
-    rows.length,
-    headers.length
+    rowCount,
+    10
   );
 
   const rules = [
@@ -285,6 +288,13 @@ function createLabelPlan() {
       .whenFormulaSatisfied('=LEFT($H2,6)="Review"')
       .setBackground('#fff4e5')
       .setRanges([dataRange])
+      .build(),
+
+    SpreadsheetApp
+      .newConditionalFormatRule()
+      .whenFormulaSatisfied('=LEFT($H2,9)="Adjusted:"')
+      .setBackground('#fff4e5')
+      .setRanges([dataRange])
       .build()
   ];
 
@@ -292,17 +302,6 @@ function createLabelPlan() {
     .filter(rule => !isLabelPlanStatusRule_(rule));
   plan.setConditionalFormatRules(userRules.concat(rules));
 
-  if (isNewPlan) {
-    plan.setFrozenRows(1);
-    plan.getRange(1, 1, 1, headers.length).setFontWeight('bold');
-  }
-
-  SpreadsheetApp.getUi().alert(
-    'Label Plan created with ' +
-    rows.length +
-    ' existing Gmail labels.\n\n' +
-    'No Gmail changes were made.'
-  );
 }
 
 
@@ -318,7 +317,8 @@ function isLabelPlanStatusRule_(rule) {
     '=$H2="Ready"': '#e6f4ea',
     '=$H2="No change"': '#f8f9fa',
     '=LEFT($H2,5)="Error"': '#fce8e6',
-    '=LEFT($H2,6)="Review"': '#fff4e5'
+    '=LEFT($H2,6)="Review"': '#fff4e5',
+    '=LEFT($H2,9)="Adjusted:"': '#fff4e5'
   };
   const formula = String(condition.getCriteriaValues()[0]);
   const ranges = rule.getRanges();
@@ -330,6 +330,57 @@ function isLabelPlanStatusRule_(rule) {
     ranges[0].getRow() === 2 &&
     ranges[0].getColumn() === 1 &&
     ranges[0].getNumColumns() === 10;
+}
+
+
+function labelPlanActionRule_() {
+  return SpreadsheetApp.newDataValidation()
+    .requireValueInList(['Keep', 'Rename/Move', 'Create', 'Delete'], true)
+    .setAllowInvalid(false)
+    .build();
+}
+
+
+function prepareLabelPlanRows_(plan = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Label Plan')) {
+  if (!plan || plan.getLastRow() < 2) return;
+  const range = plan.getRange(2, 4, plan.getLastRow() - 1, 4);
+  const values = range.getValues();
+  const formulas = range.getFormulas();
+  const rule = labelPlanActionRule_();
+  values.forEach((row, index) => {
+    if (!row.some(value => value !== '')) return;
+    const r = index + 2;
+    if (row[2] === '' && !formulas[index][2]) {
+      plan.getRange(r, 6).setFormula(
+        `=IF(E${r}="","",IF(D${r}="",E${r},D${r}&"/"&E${r}))`
+      );
+    }
+    plan.getRange(r, 7).setDataValidation(rule);
+  });
+  SpreadsheetApp.flush();
+}
+
+
+function normalizeLabelPlanActions_(plan = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Label Plan')) {
+  const adjustments = new Map();
+  if (!plan || plan.getLastRow() < 2) return adjustments;
+  const data = plan.getRange(2, 1, plan.getLastRow() - 1, 7).getValues();
+  data.forEach((row, index) => {
+    const current = String(row[0] || '');
+    const proposed = String(row[5] || '');
+    const action = String(row[6] || '').trim();
+    // An incomplete proposal is a validation error, never an inferred deletion.
+    if (action === 'Delete' || !proposed.trim()) return;
+    const expected = !current ? 'Create' : current === proposed ? 'Keep' : 'Rename/Move';
+    if (action === expected) return;
+    const reason = !current ? 'new label' : current === proposed ? 'path unchanged' : 'path changed';
+    const status = 'Adjusted: ' + reason + '; action updated to ' + expected;
+    plan.getRange(index + 2, 7).setValues([[expected]]);
+    plan.getRange(index + 2, 8).setValues([[status]]);
+    plan.getRange(index + 2, 9).clearContent();
+    adjustments.set(index + 2, status);
+  });
+  return adjustments;
 }
 
 
@@ -372,7 +423,10 @@ function validateLabelPlan() {
     return;
   }
 
+  prepareLabelPlanRows_(plan);
+  const adjustments = normalizeLabelPlanActions_(plan);
   const rowCount = lastRow - 1;
+  updateLabelPlanFormatting_(plan, rowCount);
 
   /*
    * Columns A:J
@@ -419,7 +473,9 @@ function validateLabelPlan() {
     }
   });
 
-  const results = data.map(row => {
+  const results = data.map((row, index) => {
+    if (!row.slice(0, 7).some(value => value !== '')) return [''];
+    if (adjustments.has(index + 2)) return [adjustments.get(index + 2)];
     const currentPath =
       String(row[0] || '').trim();
 
@@ -603,25 +659,150 @@ function validateLabelPlan() {
     'Ready: ' + ready + '\n' +
     'No change: ' + noChange + '\n' +
     'Review: ' + reviews + '\n' +
-    'Errors: ' + errors
+    'Errors: ' + errors + '\n' +
+    'Adjusted: ' + adjustments.size +
+    (adjustments.size > 0
+      ? '\n\nReview adjusted rows and run Validate Label Plan again.' : '')
   );
 }
 
 
-function createRunLog() {
+function preflightLabelPlan() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const plan = ss.getSheetByName('Label Plan');
+  if (!plan) {
+    ui.alert('Please create the Label Plan first.');
+    return;
+  }
+
+  const lastRow = plan.getLastRow();
+  if (lastRow < 2) {
+    ui.alert('There are no rows to preflight.');
+    return;
+  }
+
+  prepareLabelPlanRows_(plan);
+  const data = plan.getRange(2, 1, lastRow - 1, 10).getValues();
+  const resultRange = plan.getRange(2, 9, data.length, 1);
+  resultRange.clearContent();
+  const rows = data.map(row => ({
+    active: row.slice(0, 7).some(value => value !== ''),
+    current: String(row[0] || ''),
+    parent: String(row[3] || ''),
+    name: String(row[4] || ''),
+    destination: String(row[5] || ''),
+    action: String(row[6] || '').trim(),
+    validation: String(row[7] || '').trim()
+  }));
+
+  // Validation is a prerequisite, but every run still checks a fresh Gmail snapshot.
+  let livePaths;
+  try {
+    livePaths = new Set(GmailApp.getUserLabels().map(label => label.getName()));
+  } catch (error) {
+    resultRange.setValues(rows.map(row => [row.active
+      ? 'Blocked: live Gmail labels could not be read' : '']));
+    ui.alert('Preflight could not read live Gmail labels. No Gmail changes were made.\n\n' +
+      'Ready operations: 0\nDeletion reviews: 0\nBlocked operations: ' +
+      rows.filter(row => row.active).length + '\nUnchanged rows: 0');
+    return;
+  }
+
+  const plannedSources = new Set(rows.filter(row => row.current).map(row => row.current));
+  const missing = [...plannedSources].filter(path => !livePaths.has(path));
+  const added = [...livePaths].filter(path => !plannedSources.has(path));
+  const destinations = new Map();
+  const sources = new Map();
+  rows.forEach(row => {
+    if (row.current) {
+      sources.set(row.current, (sources.get(row.current) || 0) + 1);
+    }
+    if (['Keep', 'Rename/Move', 'Create'].includes(row.action) && row.destination) {
+      destinations.set(row.destination, (destinations.get(row.destination) || 0) + 1);
+    }
+  });
+
+  const counts = { ready: 0, deletion: 0, blocked: 0, unchanged: 0 };
+  const results = rows.map(row => {
+    if (!row.active) {
+      return [''];
+    }
+
+    let problem = '';
+    const reconstructed = !row.name ? '' : row.parent ? row.parent + '/' + row.name : row.name;
+    if (!['Keep', 'Rename/Move', 'Create', 'Delete'].includes(row.action)) {
+      problem = 'invalid or blank action';
+    } else if (row.action === 'Create' && row.current) {
+      problem = 'Create requires a blank current label path';
+    } else if (row.action !== 'Create' && !row.current) {
+      problem = 'source label is blank';
+    } else if (row.action !== 'Create' && !livePaths.has(row.current)) {
+      problem = 'stale plan: source label no longer exists in Gmail';
+    } else if (row.current && sources.get(row.current) > 1) {
+      problem = 'source label appears in multiple plan rows';
+    } else if (row.action !== 'Delete') {
+      if (!row.name.trim() || !row.destination.trim()) {
+        problem = 'proposed label is incomplete';
+      } else if (row.destination !== reconstructed) {
+        problem = 'proposed path does not match proposed parent and name';
+      } else if (row.action === 'Keep' && row.current !== row.destination) {
+        problem = 'path changed but action is Keep';
+      } else if (row.action === 'Rename/Move' && row.current === row.destination) {
+        problem = 'source and destination are the same';
+      } else if (destinations.get(row.destination) > 1) {
+        problem = 'duplicate proposed destination';
+      } else if (row.action !== 'Keep' && livePaths.has(row.destination)) {
+        problem = plannedSources.has(row.destination)
+          ? 'destination already exists in Gmail'
+          : 'stale plan: destination appeared in Gmail';
+      }
+    }
+
+    if (!problem && /^(Adjusted:|Error:)/.test(row.validation)) {
+      problem = 'review validation status and run Validate Label Plan again';
+    }
+    const requiredValidation = row.action === 'Delete' ? 'Review: deletion requested'
+      : row.action === 'Keep' ? 'No change' : 'Ready';
+    if (!problem && row.validation !== requiredValidation) {
+      problem = 'run Validate Label Plan before preflight';
+    }
+
+    if (problem) {
+      counts.blocked++;
+      return ['Blocked: ' + problem];
+    }
+    if (row.action === 'Delete') {
+      counts.deletion++;
+      return ['Review: explicit deletion confirmation required'];
+    }
+    if (row.action === 'Keep') {
+      counts.unchanged++;
+      return ['No change'];
+    }
+    counts.ready++;
+    return ['Ready: ' + row.action];
+  });
+
+  resultRange.setValues(results);
+  ui.alert('Preflight complete. No Gmail changes were made.\n\n' +
+    'Ready operations: ' + counts.ready + '\n' +
+    'Deletion reviews: ' + counts.deletion + '\n' +
+    'Blocked operations: ' + counts.blocked + '\n' +
+    'Unchanged rows: ' + counts.unchanged + '\n\n' +
+    (missing.length || added.length
+      ? 'Stale Gmail state relative to plan: ' + missing.length +
+        ' missing label(s), ' + added.length + ' added label(s).'
+      : 'Live Gmail label paths match the plan snapshot.') + '\n' +
+    'Preflight is a snapshot, not authorization to execute changes.');
+}
+
+
+function ensureRunLogSheet_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheetName = 'Run Log';
 
   let log = ss.getSheetByName(sheetName);
-
-  if (log) {
-    SpreadsheetApp.getUi().alert(
-      'Run Log already exists.'
-    );
-    return;
-  }
-
-  log = ss.insertSheet(sheetName);
 
   const headers = [
     'Timestamp',
@@ -630,8 +811,26 @@ function createRunLog() {
     'Original Label Path',
     'Requested Label Path',
     'Result',
-    'Details'
+    'Details',
+    'Run ID'
   ];
+
+  if (log) {
+    // Append missing headers without moving columns or touching historical entries.
+    const lastColumn = log.getLastColumn();
+    const existing = lastColumn ? log.getRange(1, 1, 1, lastColumn).getValues()[0] : [];
+    const missing = headers.filter(header => !existing.includes(header));
+    if (missing.length) {
+      const requiredColumns = lastColumn + missing.length;
+      if (requiredColumns > log.getMaxColumns()) {
+        log.insertColumnsAfter(log.getMaxColumns(), requiredColumns - log.getMaxColumns());
+      }
+      log.getRange(1, lastColumn + 1, 1, missing.length).setValues([missing]);
+    }
+    return log;
+  }
+
+  log = ss.insertSheet(sheetName);
 
   log
     .getRange(1, 1, 1, headers.length)
@@ -643,8 +842,5 @@ function createRunLog() {
     .getRange(1, 1, 1, headers.length)
     .setFontWeight('bold');
 
-  SpreadsheetApp.getUi().alert(
-    'Run Log created.\n\n' +
-    'No Gmail changes were made.'
-  );
+  return log;
 }
