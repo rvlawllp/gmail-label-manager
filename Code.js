@@ -74,7 +74,7 @@ function exportGmailLabels() {
   if (rows.length > 0) {
     sheet
       .getRange(2, 1, rows.length, headers.length)
-      .setValues(rows);
+      .setValues(rows.map(row => row.map(escapeSheetApostrophe_)));
   }
 
   sheet.setFrozenRows(1);
@@ -85,6 +85,12 @@ function exportGmailLabels() {
     rows.length +
     ' user-created Gmail labels were found.'
   );
+}
+
+
+function escapeSheetApostrophe_(value) {
+  // Escape only at the write boundary; getValues() returns the literal label text.
+  return typeof value === 'string' && value.startsWith("'") ? "'" + value : value;
 }
 
 
@@ -209,7 +215,7 @@ function createLabelPlan() {
 
   plan
     .getRange(2, 1, rows.length, headers.length)
-    .setValues(rows);
+    .setValues(rows.map(row => row.map(escapeSheetApostrophe_)));
 
   /*
    * Proposed Full Label Path

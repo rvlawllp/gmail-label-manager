@@ -19,6 +19,16 @@ class Sheet {
     }));
   }
   getName() { return this.name; }
+  clearContents() { this.cells.clear(); this.formulas.clear(); }
+  getValue(r, c) {
+    const formula = this.formulas.get(`${r},${c}`);
+    if (formula === `=IF(E${r}="","",IF(D${r}="",E${r},D${r}&"/"&E${r}))`) {
+      const parent = this.cells.get(`${r},4`);
+      const name = this.cells.get(`${r},5`);
+      return !name ? '' : !parent ? name : `${parent}/${name}`;
+    }
+    return this.cells.get(`${r},${c}`) ?? '';
+  }
   getMaxRows() { return this.maxRows; }
   getLastRow() {
     return Math.max(0, ...[...this.cells, ...this.formulas]
@@ -37,7 +47,8 @@ class Sheet {
       getLastRow: () => r + nr - 1,
       getLastColumn: () => c + nc - 1,
       getNumColumns: () => nc,
-      getValues: () => read(sheet.cells),
+      getValues: () => Array.from({ length: nr }, (_, i) =>
+        Array.from({ length: nc }, (_, j) => sheet.getValue(r + i, c + j))),
       getFormulas: () => read(sheet.formulas),
       clearContent() {
         sheet.writes.push(['clear', r, c, nr, nc]);
@@ -52,7 +63,10 @@ class Sheet {
       setValues(values) {
         sheet.writes.push(['values', r, c, nr, nc]);
         values.forEach((row, i) => row.forEach((value, j) => {
-          sheet.cells.set(`${r + i},${c + j}`, value);
+          // Sheets consumes one leading apostrophe as a text-entry escape.
+          const stored = typeof value === 'string' && value.startsWith("'")
+            ? value.slice(1) : value;
+          sheet.cells.set(`${r + i},${c + j}`, stored);
         }));
         return this;
       },
@@ -122,6 +136,35 @@ function setup(sourceRows, plan, response = 'YES') {
 }
 
 const inventory = [['Full Label Path', 'Parent Path', 'Label Name'], ['Work', '', 'Work']];
+
+for (const labelPath of ["'Overdue", "'To post", "'Waiting", "xFlags/'Overdue",
+  "'Parent/Child", "'Parent/'Overdue", "''Overdue", 'Work', 'Work/Projects', "O'Brien"]) {
+  test(`export, regenerate, and validate preserve literal label text: ${labelPath}`, () => {
+    const { context, sheets } = setup(null);
+    context.GmailApp = {
+      getUserLabels: () => [{
+        getName: () => labelPath,
+        getThreads: () => [1, 2],
+        getUnreadCount: () => 1
+      }]
+    };
+    const parts = labelPath.split('/');
+    const name = parts.pop();
+    const parent = parts.join('/');
+    for (let run = 0; run < 2; run++) {
+      context.exportGmailLabels();
+      const source = sheets.get('Gmail Labels');
+      assert.deepEqual(source.getRange(2, 1, 1, 6).getValues()[0],
+        [labelPath, parent, name, labelPath.split('/').length, 2, 1]);
+      context.createLabelPlan();
+      const plan = sheets.get('Label Plan');
+      assert.deepEqual(plan.getRange(2, 1, 1, 7).getValues()[0],
+        [labelPath, parent, name, parent, name, labelPath, 'Keep']);
+      context.validateLabelPlan();
+      assert.equal(plan.getValue(2, 8), 'No change');
+    }
+  });
+}
 
 test('missing, header-only, and blank-path inventories leave the plan untouched', () => {
   for (const source of [null, [inventory[0]], [inventory[0], ['', '', 'stray']]]) {
